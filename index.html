@@ -156,9 +156,9 @@
   // ----- Config -----
   const VIRTUAL_W = 360, VIRTUAL_H = 640;
   const DPR = Math.max(1, Math.floor(window.devicePixelRatio || 1));
-  const GRAVITY = 0.18;
-  const FLAP = -5.0;
-  const SPEED = 1.5; // 15% slower than 2.2
+  const GRAVITY = 1800;     // px/s^2 (classic flappy feel)
+  const FLAP = -420;        // px/s upwards impulse
+  const SPEED = 120;        // px/s horizontal scroll (~2px/frame @60fps)
   const GAP_CASUAL = 210;
   const GAP_HARD = 170;
   const GATE_SPACING = 220;
@@ -166,10 +166,15 @@
   const GROUND_H = 48;
 
   // --- Endless mode ramping ---
-  const BASE_SPEED = SPEED;          // reuse current base
-  const EXTRA_SPEED = 1.0;           // up to +1.0 in Endless
+  const BASE_SPEED = SPEED;          // px/s base scroll
+  const EXTRA_SPEED = 90;            // px/s extra at max difficulty (total up to ~210 px/s)
   function clamp01(v){ return Math.max(0, Math.min(1, v)); }
-  function progress01(){ return clamp01(passedCount / 40); } // reach max difficulty by ~40 gates
+  function easeInQuad(t){ return t*t; }
+  function progress01(){
+    // Ramp to full difficulty by ~60 gates, easing in so early game stays friendly
+    const p = clamp01(passedCount / 60);
+    return easeInQuad(p);
+  }
   function currentSpeed(){
     if(state.mode==='endless') return BASE_SPEED + progress01()*EXTRA_SPEED;
     return BASE_SPEED;
@@ -177,10 +182,16 @@
   function currentGap(){
     if(state.mode==='endless'){
       const p = progress01();
-      const minGap = 140; // harder than GAP_HARD a little
+      const minGap = 120; // tighter than before at full difficulty
       return Math.round(GAP_CASUAL - p*(GAP_CASUAL - minGap));
     }
     return state.mode==='casual' ? GAP_CASUAL : GAP_HARD; // safety fallback
+  }
+  function currentSpacing(){
+    const p = (state.mode==='endless') ? progress01() : 0;
+    const minSpace = 190; // px at max difficulty
+    const base = GATE_SPACING; // 220
+    return Math.round(base - p*(base - minSpace));
   }
 
   // Scoring rules
@@ -303,6 +314,11 @@
     ctx.imageSmoothingEnabled = false;
   }
   setupCanvas();
+
+  // --- Frame timing (for time-based updates) ---
+  let __lastTime = performance.now();
+  let __dtSec = 1/60;   // seconds
+  let __dt60 = 1;       // scaled so 60 FPS -> 1
 
   // ----- Recording (canvas -> WebM) -----
   let mediaRecorder = null;
@@ -470,9 +486,10 @@
 
   function updateAmbientPetals(){
     for(const p of ambientPetals){
-      p.x += p.vx + Math.sin((performance.now()/900) + p.y*0.02)*0.02;
-      p.y += p.vy;
-      p.life -= 1;
+      const sway = Math.sin((performance.now()/900) + p.y*0.02) * 0.02;
+      p.x += (p.vx + sway) * __dt60;
+      p.y += p.vy * __dt60;
+      p.life -= __dt60;
       if(p.x < -10) p.x = VIRTUAL_W + 10; if(p.x > VIRTUAL_W + 10) p.x = -10;
       if(p.y < 20) { p.y = VIRTUAL_H - GROUND_H - 6; }
     }
@@ -523,7 +540,7 @@
   function ensureAheadGates(){
     const SPAWN_AHEAD = 900; // keep ~4 gates ahead
     while(lastGateX < state.scrollX + SPAWN_AHEAD){
-      spawnGateAt( (lastGateX||320) + GATE_SPACING );
+      spawnGateAt( (lastGateX||320) + currentSpacing() );
     }
   }
   // Floating texts: {x,y,vy,life,text,color}
@@ -654,7 +671,7 @@ let winsCount = 0;
           items.push({x:ix, y:iy, type:kind, w:14, h:14, collected:false});
         }
         lastGateX = x;
-        x += GATE_SPACING;
+        x += currentSpacing();
       }
       bride.x = Infinity; // no win in endless
     } else {
@@ -873,10 +890,11 @@ let winsCount = 0;
   function update(){
     if(state.phase==='play'){
       updateAmbientPetals();
+      // Flappy style: FLAP is an instantaneous vertical velocity in px/s
       if(state.flapQueued){ player.vy = FLAP; state.flapQueued = false; }
-      player.vy += GRAVITY;
-      player.y += player.vy;
-      state.scrollX += currentSpeed();
+      player.vy += GRAVITY * __dtSec;    // a = GRAVITY (px/s^2)
+      player.y  += player.vy * __dtSec;  // integrate velocity (px/s)
+      state.scrollX += currentSpeed() * __dtSec; // scroll at px/s
 
       if(player.y < 0){ player.y = 0; player.vy = 0; }
       if(player.y + player.h > VIRTUAL_H - GROUND_H){
@@ -892,7 +910,7 @@ let winsCount = 0;
           g.open = true; // trigger opening when near
         }
         if(g.open && g.openT < 1){
-          g.openT = Math.min(1, g.openT + 0.08); // animate opening (0→1)
+          g.openT = Math.min(1, g.openT + 0.08 * __dt60); // 0.08 per 60-fps frame
         }
         const topRect = {x:onScreenX-20, y:0, w:40, h:g.gapY - g.gap/2};
         const botRect = {x:onScreenX-20, y:g.gapY + g.gap/2, w:40, h:VIRTUAL_H - GROUND_H - (g.gapY + g.gap/2)};
@@ -952,16 +970,16 @@ let winsCount = 0;
         items = items.filter(it=> (it.x - state.scrollX) > -80 && !it.collected);
       }
 
-      const gacc = 0.05;
+      const gacc = 0.05; // per 60-fps frame
       for(const p of maidPetals){
-        p.vy += gacc;
-        p.x += p.vx;
-        p.y += p.vy;
-        p.life -= 1;
+        p.vy += gacc * __dt60;
+        p.x  += p.vx * __dt60;
+        p.y  += p.vy * __dt60;
+        p.life -= __dt60;
       }
       maidPetals = maidPetals.filter(p => p.life > 0 && p.y < VIRTUAL_H - 2);
 
-      for(const f of floats){ f.y += f.vy; f.life -= 1; }
+      for(const f of floats){ f.y += f.vy * __dt60; f.life -= __dt60; }
       floats = floats.filter(f=>f.life>0);
     }
     if(state.phase!=='play') updateAmbientPetals();
@@ -1593,6 +1611,14 @@ if(state.canRestart){
   }
 
   function loop(){
+    // time step
+    const __now = performance.now();
+    __dtSec = (__now - __lastTime) / 1000;
+    if(!Number.isFinite(__dtSec) || __dtSec <= 0){ __dtSec = 1/60; }
+    if(__dtSec > 0.05) __dtSec = 0.05; // clamp to 50ms
+    __dt60 = __dtSec * 60;
+    __lastTime = __now;
+
     update();
     clear();
     if (passedCount >= 1) drawCoupleClouds();  // โชว์หลังผ่านประตูแรก
